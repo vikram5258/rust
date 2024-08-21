@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 mini-redis = "0.4"
-
+warp = "0.3.0"
+hyper = "0.14"
 
 [[bin]]
 name = "rust"

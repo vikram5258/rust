@@ -1,32 +1,62 @@
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server};
-use mini_redis::client;
+use mongodb::{bson::doc, options::ClientOptions, Client};
+use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use tokio::runtime::Runtime;
+use std::sync::Arc;
+use futures::stream::TryStreamExt;
 
-async fn handle_request(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
-    // Connect to mini-redis server
-    let mut client: client::Client = client::connect("127.0.0.1:6379").await.expect("Failed to connect to mini-redis");
+#[derive(Serialize, Deserialize, Debug)]
+struct Articles {
+    title: String,
+    author: String,
+}
 
-    // Fetch data from mini-redis
-    let result = client.get("hello").await.expect("Failed to fetch data");
+async fn handle_request(
+    _req: Request<Body>,
+    mongo_client: Arc<Client>,
+) -> Result<Response<Body>, Infallible> {
+    // Fetch data from MongoDB
+    let db: mongodb::Database = mongo_client.database("JestDB");
+    let collection: mongodb::Collection<Articles> = db.collection::<Articles>("articles");
+    let filter: mongodb::bson::Document = doc! {};
 
-    // Prepare the response
-    let response_text = match result {
-        Some(value) => format!("Fetched data: {:?}", String::from_utf8(value.to_vec()).unwrap()),
-        None => "No data found for the key".to_string(),
-    };
-
-    Ok(Response::new(Body::from(response_text)))
+    match collection.find_one(filter, None).await {
+        Ok(Some(result)) => {
+            // Return the MongoDB data
+            Ok(Response::new(Body::from(format!(
+                "Fetched from MongoDB: {:?}",
+                result
+            ))))
+        }
+        Ok(None) => Ok(Response::new(Body::from("Data not found"))),
+        Err(e) => Ok(Response::new(Body::from(format!(
+            "MongoDB query error: {}",
+            e
+        )))),
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // Set up MongoDB client
+    let mongo_client_options: ClientOptions = ClientOptions::parse("mongodb://localhost:27017")
+        .await
+        .expect("Failed to parse MongoDB URI");
+    let mongo_client: Client = Client::with_options(mongo_client_options).expect("Failed to initialize MongoDB client");
 
-    let make_svc = make_service_fn(|_conn| async {
-        Ok::<_, Infallible>(service_fn(handle_request))
+    let mongo_client: Arc<Client> = Arc::new(mongo_client);
+
+    let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 3000));
+
+    let make_svc = make_service_fn(move |_conn| {
+        let mongo_client: Arc<Client> = Arc::clone(&mongo_client);
+        async move {
+            Ok::<_, Infallible>(service_fn(move |req| {
+                handle_request(req, Arc::clone(&mongo_client))
+            }))
+        }
     });
 
     let server = Server::bind(&addr).serve(make_svc);
